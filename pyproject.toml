@@ -23,6 +23,8 @@ dev = [
     "ruff>=0.9,<1",
     "mypy>=1.14,<2",
     "pre-commit>=4,<5",
+    "respx>=0.22,<1",
+    "testcontainers>=4,<5",
 ]
 
 [project.scripts]

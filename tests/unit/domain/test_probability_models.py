@@ -16,6 +16,7 @@ from preddesk.domain.probability_models import (
     AnalystOverride,
     BaseRateModel,
     BayesianUpdater,
+    ImpliedProbabilityModel,
 )
 
 # ---------------------------------------------------------------------------
@@ -241,3 +242,56 @@ class TestAnalystOverride:
     def test_model_name(self):
         ao = AnalystOverride(probability=0.5, explanation="coin flip")
         assert ao.model_name == "analyst_override"
+
+
+# ---------------------------------------------------------------------------
+# ImpliedProbabilityModel
+# ---------------------------------------------------------------------------
+
+
+class TestImpliedProbabilityModel:
+    """The implied probability model uses the market price itself as the
+    probability estimate. It is the simplest possible model and serves
+    as the baseline/benchmark against which all other models are compared.
+
+    Implied probability: p = price / overround
+
+    With overround=1.0 (no vig), p = price directly.
+    With overround>1.0, the raw price overstates the true probability.
+    """
+
+    def test_basic_estimate(self):
+        """Price 0.65 with no overround → implied probability 0.65."""
+        model = ImpliedProbabilityModel(market_price=0.65)
+        assert model.estimate() == pytest.approx(0.65)
+
+    def test_with_overround(self):
+        """Price 0.65 with overround 1.10 → 0.65/1.10 ≈ 0.5909."""
+        model = ImpliedProbabilityModel(market_price=0.65, overround=1.10)
+        assert model.estimate() == pytest.approx(0.65 / 1.10, rel=1e-4)
+
+    def test_boundary_zero(self):
+        model = ImpliedProbabilityModel(market_price=0.0)
+        assert model.estimate() == pytest.approx(0.0)
+
+    def test_boundary_one(self):
+        model = ImpliedProbabilityModel(market_price=1.0)
+        assert model.estimate() == pytest.approx(1.0)
+
+    def test_rejects_negative_price(self):
+        with pytest.raises(ValueError):
+            ImpliedProbabilityModel(market_price=-0.1)
+
+    def test_rejects_price_above_overround(self):
+        """Price cannot exceed overround (would yield p > 1)."""
+        with pytest.raises(ValueError):
+            ImpliedProbabilityModel(market_price=1.2, overround=1.0)
+
+    def test_confidence_interval_is_none(self):
+        """Implied probability has no uncertainty model — returns None."""
+        model = ImpliedProbabilityModel(market_price=0.65)
+        assert model.confidence_interval() is None
+
+    def test_model_name(self):
+        model = ImpliedProbabilityModel(market_price=0.50)
+        assert model.model_name == "implied_probability"

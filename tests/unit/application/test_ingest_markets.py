@@ -13,6 +13,7 @@ from preddesk.infrastructure.in_memory_repos import (
     InMemoryEventRepository,
     InMemoryMarketRepository,
     InMemoryPriceSnapshotRepository,
+    InMemoryRawPayloadRepository,
 )
 
 
@@ -152,3 +153,45 @@ class TestIngestMarkets:
         )
         result = use_case.execute()
         assert result.markets_ingested == 0
+
+    def test_persists_raw_payloads(self):
+        """When a raw_payload_repo is provided, each provider payload
+        is stored as a RawMarketPayload for audit and replay."""
+        event_repo = InMemoryEventRepository()
+        market_repo = InMemoryMarketRepository()
+        snapshot_repo = InMemoryPriceSnapshotRepository()
+        raw_repo = InMemoryRawPayloadRepository()
+        provider = FakeMarketDataProvider(_make_provider_data())
+        clock = FakeClock(NOW)
+
+        use_case = IngestMarkets(
+            provider=provider,
+            event_repo=event_repo,
+            market_repo=market_repo,
+            snapshot_repo=snapshot_repo,
+            clock=clock,
+            raw_payload_repo=raw_repo,
+        )
+
+        result = use_case.execute()
+
+        assert result.markets_ingested == 2
+        all_payloads = raw_repo.list_by_provider("polymarket")
+        assert len(all_payloads) == 2
+        # Each payload should reference the canonical market
+        for payload in all_payloads:
+            assert payload.market_id is not None
+            assert payload.raw_data is not None
+
+    def test_works_without_raw_payload_repo(self):
+        """Ingestion works fine without raw_payload_repo (backwards compatible)."""
+        provider = FakeMarketDataProvider(_make_provider_data())
+        use_case = IngestMarkets(
+            provider=provider,
+            event_repo=InMemoryEventRepository(),
+            market_repo=InMemoryMarketRepository(),
+            snapshot_repo=InMemoryPriceSnapshotRepository(),
+            clock=FakeClock(NOW),
+        )
+        result = use_case.execute()
+        assert result.markets_ingested == 2

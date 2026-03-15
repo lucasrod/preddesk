@@ -13,6 +13,7 @@ See docs/domain/backtesting.md for methodology and pitfalls.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
@@ -52,6 +53,17 @@ class BacktestConfig:
 
 
 @dataclass(frozen=True)
+class CalibrationBucket:
+    """A single bucket in a calibration analysis."""
+
+    lower: float
+    upper: float
+    avg_forecast: float
+    observed_freq: float
+    count: int
+
+
+@dataclass(frozen=True)
 class BacktestMetrics:
     """Performance metrics for a completed backtest.
 
@@ -60,8 +72,13 @@ class BacktestMetrics:
     - hit_rate: Fraction of profitable round-trips (None if no trades).
     - max_drawdown: Maximum peak-to-trough decline in cumulative PnL.
     - avg_edge_captured: Mean PnL per round-trip (None if no round-trips).
-    - avg_holding_time_seconds: Mean time between entry and exit fills (None if no round-trips).
+    - avg_holding_time_seconds: Mean time between entry and exit fills.
     - turnover: Total quantity traded across all fills.
+    - sharpe_ratio: mean(round_trip_pnl) / std(round_trip_pnl). None if <2 distinct values.
+    - brier_score: mean((forecast - outcome)^2) where forecast is the mid_price
+      at entry and outcome is 1 if profitable, 0 otherwise. None if no round-trips.
+    - calibration_buckets: list of CalibrationBucket dicts grouping forecasts by
+      predicted probability and comparing to observed frequency.
     """
 
     total_return: float
@@ -70,6 +87,9 @@ class BacktestMetrics:
     avg_edge_captured: float | None = None
     avg_holding_time_seconds: float | None = None
     turnover: float = 0.0
+    sharpe_ratio: float | None = None
+    brier_score: float | None = None
+    calibration_buckets: list[dict[str, object]] | None = None
 
 
 @dataclass
@@ -85,6 +105,36 @@ class BacktestResult:
 # ---------------------------------------------------------------------------
 # Backtester
 # ---------------------------------------------------------------------------
+
+
+def _compute_calibration_buckets(
+    pairs: list[tuple[float, int]],
+    n_buckets: int = 10,
+) -> list[dict[str, object]]:
+    """Group forecast/outcome pairs into calibration buckets.
+
+    Each bucket spans a range of predicted probabilities [lower, upper)
+    and reports the average forecast, observed frequency (fraction of
+    outcomes = 1), and count.
+    """
+    width = 1.0 / n_buckets
+    buckets: list[dict[str, object]] = []
+    for i in range(n_buckets):
+        lo = i * width
+        hi = (i + 1) * width
+        in_bucket = [(f, o) for f, o in pairs if lo <= f < hi or (i == n_buckets - 1 and f == hi)]
+        if not in_bucket:
+            continue
+        avg_f = sum(f for f, _ in in_bucket) / len(in_bucket)
+        obs_freq = sum(o for _, o in in_bucket) / len(in_bucket)
+        buckets.append({
+            "lower": lo,
+            "upper": hi,
+            "avg_forecast": avg_f,
+            "observed_freq": obs_freq,
+            "count": len(in_bucket),
+        })
+    return buckets
 
 
 class Backtester:
@@ -119,8 +169,10 @@ class Backtester:
 
         # Track entry times for holding-time calculation
         entry_time: datetime | None = None
+        entry_mid_price: float | None = None  # for Brier score / calibration
 
         holding_times: list[float] = []  # seconds per round-trip
+        forecast_outcome_pairs: list[tuple[float, int]] = []  # (mid_price, 1 if profitable else 0)
 
         for snap in sorted_snaps:
             if snap.best_bid is None or snap.best_ask is None:
@@ -151,6 +203,7 @@ class Backtester:
             if side == OrderSide.BUY:
                 if position_qty == 0.0:
                     entry_time = snap.captured_at
+                    entry_mid_price = snap.mid_price
                 # Update position
                 total_cost = avg_cost * position_qty + fill.fill_price * fill.fill_quantity
                 position_qty += fill.fill_quantity
@@ -168,10 +221,16 @@ class Backtester:
                     dt = (snap.captured_at - entry_time).total_seconds()
                     holding_times.append(dt)
 
+                # Track forecast/outcome for Brier score and calibration
+                if entry_mid_price is not None:
+                    outcome = 1 if pnl > 0 else 0
+                    forecast_outcome_pairs.append((entry_mid_price, outcome))
+
                 if position_qty <= 0:
                     position_qty = 0.0
                     avg_cost = 0.0
                     entry_time = None
+                    entry_mid_price = None
 
             # Track equity curve for max drawdown
             peak_pnl = max(peak_pnl, realized_pnl)
@@ -189,6 +248,24 @@ class Backtester:
 
         avg_ht: float | None = sum(holding_times) / len(holding_times) if holding_times else None
 
+        # Sharpe ratio: mean / std of round-trip PnLs (None if <2 distinct values)
+        sharpe: float | None = None
+        if len(round_trips) >= 2:
+            mean_pnl = sum(round_trips) / len(round_trips)
+            variance = sum((r - mean_pnl) ** 2 for r in round_trips) / (len(round_trips) - 1)
+            std_pnl = math.sqrt(variance)
+            if std_pnl > 0:
+                sharpe = mean_pnl / std_pnl
+
+        # Brier score and calibration from forecast/outcome pairs
+        brier: float | None = None
+        cal_buckets: list[dict[str, object]] | None = None
+        if forecast_outcome_pairs:
+            brier = sum(
+                (f - o) ** 2 for f, o in forecast_outcome_pairs
+            ) / len(forecast_outcome_pairs)
+            cal_buckets = _compute_calibration_buckets(forecast_outcome_pairs)
+
         metrics = BacktestMetrics(
             total_return=realized_pnl,
             hit_rate=hit_rate,
@@ -196,6 +273,9 @@ class Backtester:
             avg_edge_captured=avg_edge,
             avg_holding_time_seconds=avg_ht,
             turnover=total_quantity_traded,
+            sharpe_ratio=sharpe,
+            brier_score=brier,
+            calibration_buckets=cal_buckets,
         )
 
         return BacktestResult(

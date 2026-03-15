@@ -30,6 +30,7 @@ from preddesk.domain.entities import (
     PaperOrder,
     Position,
     PriceSnapshot,
+    RawMarketPayload,
     Signal,
     SignalType,
     StrategyRun,
@@ -45,6 +46,7 @@ from preddesk.domain.ports import (
     PaperOrderRepository,
     PositionRepository,
     PriceSnapshotRepository,
+    RawPayloadRepository,
     SignalRepository,
     StrategyRunRepository,
 )
@@ -87,12 +89,14 @@ class IngestMarkets:
         market_repo: MarketRepository,
         snapshot_repo: PriceSnapshotRepository,
         clock: Clock,
+        raw_payload_repo: RawPayloadRepository | None = None,
     ) -> None:
         self._provider = provider
         self._event_repo = event_repo
         self._market_repo = market_repo
         self._snapshot_repo = snapshot_repo
         self._clock = clock
+        self._raw_payload_repo = raw_payload_repo
 
     def execute(self) -> IngestResult:
         raw_markets = self._provider.fetch_active_markets()
@@ -162,6 +166,17 @@ class IngestMarkets:
             volume=raw.get("volume"),
         )
         self._snapshot_repo.save(snapshot)
+
+        # Persist raw payload for audit if repo is configured
+        if self._raw_payload_repo is not None:
+            payload = RawMarketPayload(
+                payload_id=uuid4(),
+                provider=raw.get("venue", "unknown"),
+                fetched_at=now,
+                raw_data=raw,
+                market_id=market.market_id,
+            )
+            self._raw_payload_repo.save(payload)
 
         return market if market_is_new else None
 

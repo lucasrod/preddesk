@@ -18,6 +18,42 @@ import math
 from preddesk.domain.value_objects import ConfidenceInterval
 
 
+class ImpliedProbabilityModel:
+    """Use market price directly as probability estimate.
+
+    This is the simplest model and the baseline against which all others
+    are compared. The implied probability is:
+
+        p = price / overround
+
+    With overround=1.0 (no vig), the price is the implied probability.
+    With overround>1.0, the raw price overstates the true probability
+    because the book has a margin built into the prices.
+    """
+
+    model_name: str = "implied_probability"
+
+    def __init__(self, market_price: float, overround: float = 1.0) -> None:
+        if market_price < 0.0:
+            msg = f"market_price must be >= 0, got {market_price}"
+            raise ValueError(msg)
+        if market_price > overround:
+            msg = f"market_price ({market_price}) cannot exceed overround ({overround})"
+            raise ValueError(msg)
+        self._price = market_price
+        self._overround = overround
+
+    def estimate(self) -> float:
+        """Point estimate: price / overround."""
+        if self._overround == 0.0:
+            return 0.0
+        return self._price / self._overround
+
+    def confidence_interval(self) -> None:
+        """No uncertainty model — implied probability is a point estimate."""
+        return None
+
+
 class BaseRateModel:
     """Estimate probability from historical frequencies.
 

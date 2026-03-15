@@ -333,3 +333,168 @@ class TestBacktestMetrics:
         assert result.metrics.avg_edge_captured is None
         assert result.metrics.avg_holding_time_seconds is None
         assert result.metrics.turnover == pytest.approx(0.0)
+
+    def test_sharpe_ratio_single_profitable_trade(self):
+        """Sharpe ratio = mean(returns) / std(returns).
+        With a single round-trip, std is 0, so Sharpe is None."""
+        result = self._run_buy_then_sell()
+        assert result.metrics.sharpe_ratio is None  # undefined for single trade
+
+    def test_sharpe_ratio_multiple_trades(self):
+        """With multiple round-trips of varying PnL, Sharpe is well-defined.
+
+        Sharpe = mean(round_trip_pnls) / std(round_trip_pnls)
+        """
+
+        class TwoRoundTrips:
+            """Buys and sells twice."""
+
+            def __init__(self):
+                self._step = 0
+
+            def on_snapshot(self, snapshot, position_qty):
+                self._step += 1
+                if self._step == 1 and position_qty == 0.0:
+                    return (OrderSide.BUY, 10.0)
+                if self._step == 2 and position_qty > 0.0:
+                    return (OrderSide.SELL, 10.0)
+                if self._step == 3 and position_qty == 0.0:
+                    return (OrderSide.BUY, 10.0)
+                if self._step == 4 and position_qty > 0.0:
+                    return (OrderSide.SELL, 10.0)
+                return None
+
+        snapshots = _make_snapshots([
+            (0.50, 0.55),  # buy at 0.55
+            (0.65, 0.70),  # sell at 0.65 → profit 1.00
+            (0.40, 0.45),  # buy at 0.45
+            (0.55, 0.60),  # sell at 0.55 → profit 1.00
+        ])
+        broker = PaperBroker(
+            execution_model=BidAskExecution(),
+            slippage_model=SlippageModel(slippage_bps=0.0),
+            fee_model=FeeModel(fee_rate=0.0),
+            risk_policy=RiskPolicy(max_position_size=1000.0, max_portfolio_exposure=100000.0),
+        )
+        bt = Backtester(broker=broker)
+        result = bt.run(
+            snapshots=snapshots,
+            strategy=TwoRoundTrips(),
+            config=BacktestConfig(strategy_name="two_rt", version="1.0"),
+        )
+        # Both round-trips profit 1.00 each — returns are nearly identical
+        # Sharpe is very large (near-zero std) or defined; key point is it's positive
+        assert result.metrics.sharpe_ratio is not None
+        assert result.metrics.sharpe_ratio > 0
+
+    def test_sharpe_ratio_with_variance(self):
+        """Sharpe with different returns: profit 1.00 and loss -2.00.
+
+        mean = (1.00 + (-2.00)) / 2 = -0.50
+        std = sqrt(((1.00 - (-0.50))^2 + (-2.00 - (-0.50))^2) / 1) = sqrt((2.25+2.25)/1) ≈ 2.121
+        Sharpe ≈ -0.50 / 2.121 ≈ -0.2357
+        """
+
+        class WinLoseStrategy:
+            def __init__(self):
+                self._step = 0
+
+            def on_snapshot(self, snapshot, position_qty):
+                self._step += 1
+                if self._step == 1 and position_qty == 0.0:
+                    return (OrderSide.BUY, 10.0)
+                if self._step == 2 and position_qty > 0.0:
+                    return (OrderSide.SELL, 10.0)
+                if self._step == 3 and position_qty == 0.0:
+                    return (OrderSide.BUY, 10.0)
+                if self._step == 4 and position_qty > 0.0:
+                    return (OrderSide.SELL, 10.0)
+                return None
+
+        snapshots = _make_snapshots([
+            (0.50, 0.55),  # buy at 0.55
+            (0.65, 0.70),  # sell at 0.65 → profit 1.00
+            (0.60, 0.65),  # buy at 0.65
+            (0.45, 0.50),  # sell at 0.45 → loss -2.00
+        ])
+        broker = PaperBroker(
+            execution_model=BidAskExecution(),
+            slippage_model=SlippageModel(slippage_bps=0.0),
+            fee_model=FeeModel(fee_rate=0.0),
+            risk_policy=RiskPolicy(max_position_size=1000.0, max_portfolio_exposure=100000.0),
+        )
+        bt = Backtester(broker=broker)
+        result = bt.run(
+            snapshots=snapshots,
+            strategy=WinLoseStrategy(),
+            config=BacktestConfig(strategy_name="win_lose", version="1.0"),
+        )
+        assert result.metrics.sharpe_ratio is not None
+        assert result.metrics.sharpe_ratio < 0  # negative edge
+
+    def test_no_trades_sharpe_is_none(self):
+        bt = Backtester(
+            broker=PaperBroker(
+                execution_model=BidAskExecution(),
+                slippage_model=SlippageModel(slippage_bps=0.0),
+                fee_model=FeeModel(fee_rate=0.0),
+                risk_policy=RiskPolicy(max_position_size=100.0, max_portfolio_exposure=10000.0),
+            )
+        )
+        result = bt.run(
+            snapshots=_make_snapshots([(0.50, 0.55)]),
+            strategy=NeverTradeStrategy(),
+            config=BacktestConfig(strategy_name="none", version="1.0"),
+        )
+        assert result.metrics.sharpe_ratio is None
+
+    def test_brier_score_profitable_trade(self):
+        """Brier score measures calibration of the implied buy signal.
+
+        When the backtester buys at mid_price (the market's implied prob)
+        and the trade is profitable, the outcome is 1 (success).
+
+        Brier = mean((forecast - outcome)^2)
+
+        Buy at mid=0.525, trade is profitable → outcome=1
+        Brier = (0.525 - 1)^2 = 0.225625
+        """
+        result = self._run_buy_then_sell()
+        assert result.metrics.brier_score is not None
+        # mid_price at buy time: (0.50+0.55)/2 = 0.525
+        expected_brier = (0.525 - 1.0) ** 2
+        assert result.metrics.brier_score == pytest.approx(expected_brier, rel=1e-3)
+
+    def test_no_round_trips_brier_is_none(self):
+        bt = Backtester(
+            broker=PaperBroker(
+                execution_model=BidAskExecution(),
+                slippage_model=SlippageModel(slippage_bps=0.0),
+                fee_model=FeeModel(fee_rate=0.0),
+                risk_policy=RiskPolicy(max_position_size=100.0, max_portfolio_exposure=10000.0),
+            )
+        )
+        result = bt.run(
+            snapshots=_make_snapshots([(0.50, 0.55)]),
+            strategy=NeverTradeStrategy(),
+            config=BacktestConfig(strategy_name="none", version="1.0"),
+        )
+        assert result.metrics.brier_score is None
+
+    def test_calibration_buckets(self):
+        """Calibration buckets group forecasts by predicted probability range
+        and compare to observed outcome frequency.
+
+        Each bucket: (bucket_lower, bucket_upper, avg_forecast, observed_freq, count).
+        """
+        result = self._run_buy_then_sell()
+        buckets = result.metrics.calibration_buckets
+        assert buckets is not None
+        assert len(buckets) > 0
+        # Each bucket is a dict with expected keys
+        bucket = buckets[0]
+        assert "lower" in bucket
+        assert "upper" in bucket
+        assert "avg_forecast" in bucket
+        assert "observed_freq" in bucket
+        assert "count" in bucket
