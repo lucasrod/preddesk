@@ -1,6 +1,11 @@
-# Agent and project configuration
+# Agent configuration
 AGENTS.md
-CLAUDE.md
+
+# Hypothesis property-based testing cache
+.hypothesis/
+
+# Claude Code local config
+.claude/
 
 # Python
 __pycache__/
@@ -100,5 +105,4 @@ experiments/*/checkpoints/
 experiments/*/logs/
 
 # OS
-.DS_Store
 Thumbs.db
